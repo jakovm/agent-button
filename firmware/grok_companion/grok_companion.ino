@@ -3,14 +3,12 @@
 
 #define LED_PIN 27
 #define NUM_LEDS 25
+#define GRID_SIZE 5
 
 #define ACTIVE_BRIGHTNESS 28
 #define SAFE_BRIGHTNESS 12
-#define ATTENTION_BRIGHTNESS 30
 
-#define ATTENTION_INTERVAL_MS 15000
-#define ATTENTION_PULSE_MS 700
-#define SAFE_BREATHE_MS 80
+#define IDLE_STEP_MS 260
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -24,13 +22,12 @@ enum Status : char {
 Status currentStatus = STATUS_IDLE;
 uint8_t animFrame = 0;
 uint32_t lastAnimMs = 0;
-uint32_t lastIdleAnimMs = 0;
-uint32_t lastAttentionMs = 0;
-uint32_t attentionStartMs = 0;
-bool attentionPulseActive = false;
-uint8_t safeBreatheLevel = 22;
+uint32_t lastIdleStepMs = 0;
 
-const uint8_t ATTENTION_PIXELS[5] = {7, 11, 12, 13, 17};
+int8_t dotX = 2;
+int8_t dotY = 2;
+int8_t targetX = 0;
+int8_t targetY = 0;
 
 const uint8_t PATTERN_CHECK[25] = {
   0, 0, 0, 0, 0,
@@ -52,17 +49,8 @@ uint32_t colorRgb(uint8_t r, uint8_t g, uint8_t b) {
   return strip.Color(r, g, b);
 }
 
-uint8_t lerpU8(uint8_t a, uint8_t b, uint8_t t) {
-  return a + ((int16_t)(b - a) * t) / 255;
-}
-
-bool isAttentionPixel(uint8_t index) {
-  for (uint8_t i = 0; i < 5; i++) {
-    if (ATTENTION_PIXELS[i] == index) {
-      return true;
-    }
-  }
-  return false;
+uint8_t pixelIndex(uint8_t x, uint8_t y) {
+  return y * GRID_SIZE + x;
 }
 
 void clearMatrix() {
@@ -79,38 +67,48 @@ void drawPattern(const uint8_t pattern[25], uint32_t onColor) {
   strip.show();
 }
 
-void drawSafeIdle(uint8_t level) {
-  strip.setBrightness(SAFE_BRIGHTNESS);
-  uint32_t dimBlue = colorRgb(0, 8, level);
-  for (uint8_t i = 0; i < NUM_LEDS; i++) {
-    strip.setPixelColor(i, dimBlue);
-  }
-  strip.show();
+int8_t randomGridPos() {
+  return (int8_t)random(0, GRID_SIZE);
 }
 
-void drawAttentionPulse(uint8_t strength) {
-  strip.setBrightness(lerpU8(SAFE_BRIGHTNESS, ATTENTION_BRIGHTNESS, strength));
-  uint32_t dimBlue = colorRgb(0, 10, 28);
+void pickNewIdleTarget() {
+  int8_t nextX;
+  int8_t nextY;
+  do {
+    nextX = randomGridPos();
+    nextY = randomGridPos();
+  } while (nextX == dotX && nextY == dotY);
+  targetX = nextX;
+  targetY = nextY;
+}
 
-  for (uint8_t i = 0; i < NUM_LEDS; i++) {
-    if (isAttentionPixel(i)) {
-      strip.setPixelColor(i, colorRgb(
-        (40 * strength) / 255,
-        (80 * strength) / 255,
-        lerpU8(60, 255, strength)
-      ));
-    } else {
-      strip.setPixelColor(i, dimBlue);
+void resetIdleWander() {
+  dotX = 2;
+  dotY = 2;
+  targetX = randomGridPos();
+  targetY = randomGridPos();
+  if (targetX == dotX && targetY == dotY) {
+    pickNewIdleTarget();
+  }
+  lastIdleStepMs = millis();
+}
+
+void drawIdleWander() {
+  strip.setBrightness(SAFE_BRIGHTNESS);
+  uint32_t dimBlue = colorRgb(0, 6, 20);
+  uint32_t brightBlue = colorRgb(0, 48, 210);
+
+  for (uint8_t y = 0; y < GRID_SIZE; y++) {
+    for (uint8_t x = 0; x < GRID_SIZE; x++) {
+      uint8_t idx = pixelIndex(x, y);
+      if ((int8_t)x == dotX && (int8_t)y == dotY) {
+        strip.setPixelColor(idx, brightBlue);
+      } else {
+        strip.setPixelColor(idx, dimBlue);
+      }
     }
   }
   strip.show();
-}
-
-void resetIdleAttention() {
-  attentionPulseActive = false;
-  lastAttentionMs = millis();
-  lastIdleAnimMs = millis();
-  safeBreatheLevel = 22;
 }
 
 void drawWorking(uint8_t frame) {
@@ -134,8 +132,8 @@ void applyStatus(Status status) {
 
   switch (status) {
     case STATUS_IDLE:
-      resetIdleAttention();
-      drawSafeIdle(safeBreatheLevel);
+      resetIdleWander();
+      drawIdleWander();
       break;
     case STATUS_WORKING:
       strip.setBrightness(ACTIVE_BRIGHTNESS);
@@ -154,45 +152,28 @@ void applyStatus(Status status) {
 
 void updateIdleAnimation() {
   uint32_t now = millis();
-
-  if (!attentionPulseActive && now - lastAttentionMs >= ATTENTION_INTERVAL_MS) {
-    attentionPulseActive = true;
-    attentionStartMs = now;
-  }
-
-  if (attentionPulseActive) {
-    uint32_t elapsed = now - attentionStartMs;
-    if (elapsed >= ATTENTION_PULSE_MS) {
-      attentionPulseActive = false;
-      lastAttentionMs = now;
-      drawSafeIdle(safeBreatheLevel);
-      return;
-    }
-
-    uint8_t strength;
-    uint32_t half = ATTENTION_PULSE_MS / 2;
-    if (elapsed < half) {
-      strength = (uint8_t)((elapsed * 255) / half);
-    } else {
-      strength = (uint8_t)(((ATTENTION_PULSE_MS - elapsed) * 255) / half);
-    }
-    drawAttentionPulse(strength);
+  if (now - lastIdleStepMs < IDLE_STEP_MS) {
     return;
   }
+  lastIdleStepMs = now;
 
-  if (now - lastIdleAnimMs >= SAFE_BREATHE_MS) {
-    lastIdleAnimMs = now;
-    static int8_t breatheDir = 1;
-    safeBreatheLevel += breatheDir;
-    if (safeBreatheLevel >= 30) {
-      safeBreatheLevel = 30;
-      breatheDir = -1;
-    } else if (safeBreatheLevel <= 18) {
-      safeBreatheLevel = 18;
-      breatheDir = 1;
-    }
-    drawSafeIdle(safeBreatheLevel);
+  if (dotX == targetX && dotY == targetY) {
+    pickNewIdleTarget();
   }
+
+  if (dotX < targetX) {
+    dotX++;
+  } else if (dotX > targetX) {
+    dotX--;
+  }
+
+  if (dotY < targetY) {
+    dotY++;
+  } else if (dotY > targetY) {
+    dotY--;
+  }
+
+  drawIdleWander();
 }
 
 void updateAnimation() {
@@ -224,6 +205,7 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
+  randomSeed(esp_random());
 
   strip.begin();
   clearMatrix();
